@@ -35,8 +35,10 @@ get_param <- function(name,
 ###### -- copy function -------------------------------------------------------
 
 copy_into <- function(param,
-                      tensor_name) {
-  source_tensor <- get_param(tensor_name)
+                      tensor_name,
+                      weights) {
+  source_tensor <- get_param(tensor_name,
+                             weights = weights)
   if (!all(dim(param) == dim(source_tensor))) {
     stop(
       "shape mismatch loading '", tensor_name, "': ",
@@ -248,7 +250,7 @@ esm_self_attention <- nn_module(
   }
 )
 
-###### -- one transformer layer (pre-norm, matching ESM2's architecture) --------
+###### -- one transformer layer (pre-norm, matching ESM2's architecture) ------
 
 esm_layer <- nn_module(
   initialize = function(hidden_size,
@@ -316,5 +318,60 @@ esm_encoder <- nn_module(
     self$final_ln(x)
   }
 )
+
+###### -- lm head -------------------------------------------------------------
+
+esm_lm_head <- nn_module(
+  initialize = function(hidden_size, vocab_size, eps) {
+    self$dense <- nn_linear(hidden_size, hidden_size)
+    self$layer_norm <- nn_layer_norm(hidden_size, eps = eps)
+    self$decoder <- nn_linear(hidden_size, vocab_size, bias = FALSE)
+    self$bias <- nn_parameter(torch_zeros(vocab_size))
+  },
+  forward = function(x) {
+    x <- nnf_gelu(self$dense(x))
+    x <- self$layer_norm(x)
+    self$decoder(x) + self$bias
+  }
+)
+
+###### -- pseudo-likelihood scores --------------------------------------------
+
+pseudo_likelihood <- function(aa_string,
+                              token_to_id,
+                              unk_id) {
+  base_ids <- tokenize_sequence(aa_string = aa_string,
+                                token_to_id = token_to_id,
+                                unk_id = unk_id)
+  real_len <- nchar(aa_string)
+  
+  # one row per residue position; row i has position (i+1) replaced with <mask>
+  # (+1 in the column index skips the leading <cls>)
+  batch_matrix <- matrix(rep(base_ids,
+                             each = real_len),
+                         nrow = real_len,
+                         byrow = TRUE)
+  for (i in seq_len(real_len)) {
+    batch_matrix[i, i + 1] <- mask_id
+  }
+  
+  input_ids <- torch_tensor(batch_matrix, dtype = torch_long())$to(device = device)
+  attn_mask <- torch_ones_like(input_ids, dtype = torch_float())$to(device = device)
+  
+  with_no_grad({
+    hidden  <- model(input_ids, attn_mask)
+    logits  <- lm_head(hidden)
+  })
+  
+  log_probs <- nnf_log_softmax(logits, dim = -1)
+  true_ids  <- base_ids[2:(real_len + 1)] + 1L   # 1-indexed for logits lookup
+  
+  position_log_probs <- sapply(seq_len(real_len), function(i) {
+    as.numeric(log_probs[i, i + 1, true_ids[i]]$to(device = "cpu"))
+  })
+  
+  return(position_log_probs)
+}
+
 
 
