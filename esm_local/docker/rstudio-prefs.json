@@ -1,0 +1,9 @@
+{
+    "initial_working_directory": "~",
+    "editor_theme": "Chaos",
+    "posix_terminal_shell": "bash",
+    "continue_comments_on_newline": true,
+    "enable_snippets": false,
+    "jobs_tab_visibility": "shown"
+}
+
